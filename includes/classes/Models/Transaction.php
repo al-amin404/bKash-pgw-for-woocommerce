@@ -451,7 +451,7 @@ class Transaction {
 
 		$this->errorMessage = $this->wpdb->last_error; // set if any error or null
 
-		return $updated > 0;
+		return false !== $updated;
 	}
 
 	final public function getTransaction( $invoice_id = "", $trx_id = "" ) {

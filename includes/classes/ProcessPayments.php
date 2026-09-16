@@ -45,30 +45,56 @@ class ProcessPayments {
 			$status     = Utils::safePostValue( 'status' );
 		}
 
-		// To receive order id
 		$order       = wc_get_order( $order_id );
 		$trx         = new Transaction();
 		$transaction = $trx->getTransaction( $invoice_id );
 
+		if ( ! $order || ! $transaction ) {
+			$this->failAndExit( $this->processResponse( 'Invalid payment ID or Invoice ID' ), $orderPageURL );
+		}
+
+		if ( $this->isSuccessfulTransaction( $transaction ) ) {
+			$this->finalizeSuccessfulOrder( $order, $transaction, $orderPageURL );
+		}
+
+		if ( ! empty( $transaction->getTrxID() ) ) {
+			$recovered = $this->recoverSuccessfulPayment( $transaction );
+			if ( $recovered instanceof Transaction ) {
+				$this->finalizeSuccessfulOrder( $order, $recovered, $orderPageURL );
+			}
+
+			$this->failAndExit(
+				$this->processResponse( 'This payment was already processed. Please check the order status or contact support.' ),
+				$orderPageURL,
+				$order
+			);
+		}
+
 		if ( $status === 'success' ) {
-			if ( $transaction && $transaction->getPaymentID() === $payment_id ) {
+			if ( $transaction->getPaymentID() === $payment_id ) {
+				$transaction = $this->waitForInFlightExecute( $invoice_id, $payment_id, $transaction );
+				if ( $this->isSuccessfulTransaction( $transaction ) ) {
+					$this->finalizeSuccessfulOrder( $order, $transaction, $orderPageURL );
+				}
+
+				$lock_key = $this->executeLockKey( $payment_id );
+				set_transient( $lock_key, 1, 120 );
+
 				$transaction->update(
 					array(
 						'status' => 'CALLBACK_REACHED',
 					)
 				);
 
-				// EXECUTE OPERATION
 				$response = $this->bKashObj->executePayment( $transaction->getPaymentID() );
 
 				if ( isset( $response['status_code'] ) && $response['status_code'] === 200 ) {
 					$mode = $transaction->getMode();
 
-					// 0011 - Checkout URL, 0000 - Create Agreement, 0001 - Create Payment
 					if ( $mode === '0000' ) {
 						$agreementResp = Operations::processResponse( $response, 'agreementID' );
 						if ( is_array( $agreementResp ) ) {
-							if ( $agreementResp['agreementStatus'] === 'Completed' ) {
+							if ( ( $agreementResp['agreementStatus'] ?? '' ) === 'Completed' ) {
 								$agreementObj = new Agreement();
 								$agreementObj->setAgreementID( $agreementResp['agreementID'] ?? '' );
 								$agreementObj->setMobileNo( $agreementResp['customerMsisdn'] ?? '' );
@@ -90,16 +116,19 @@ class ProcessPayments {
 										$transaction
 									);
 
+									delete_transient( $lock_key );
+
 									if ( isset( $createResp['redirect'] ) ) {
 										wp_safe_redirect( $createResp['redirect'] );
 										die();
 									}
 
 									echo wp_json_encode( $createResp );
-								} else {
-									$message = 'Agreement cannot be done right now, cannot store in db, try again. ' . $agreementObj->errorMessage;
-									$message = $this->processResponse( $message );
+									die();
 								}
+
+								$message = 'Agreement cannot be done right now, cannot store in db, try again. ' . $agreementObj->errorMessage;
+								$message = $this->processResponse( $message );
 							} else {
 								$message = $this->processResponse( 'Agreement cannot be done right now, try again' );
 							}
@@ -108,86 +137,45 @@ class ProcessPayments {
 							$message = $this->processResponse( $message );
 						}
 					} else {
-						// GET TRXID FROM BKASH RESPONSE
-						$paymentResp = Operations::processResponse( $response, 'trxID' );
+						$paymentResp = $this->resolveExecutedPayment( $response, $transaction );
 
-						if ( is_array( $paymentResp ) ) {
-							// PAYMENT IS DONE SUCCESSFULLY, NOW START REST OF THE PROCESS TO UPDATE WC ORDER
-
-							// Updating transaction status
-							$status  = $paymentResp['transactionStatus'] ?? 'NO_STATUS_EXECUTE';
-							$updated = $transaction->update(
+						if ( is_array( $paymentResp ) && ! empty( $paymentResp['trxID'] ) ) {
+							$bkash_status = $paymentResp['transactionStatus'] ?? 'NO_STATUS_EXECUTE';
+							$transaction->update(
 								array(
-									'status' => $status,
-									'trx_id' => $paymentResp['trxID'] ?? '',
+									'status' => $bkash_status,
+									'trx_id' => $paymentResp['trxID'],
 								)
 							);
 
-							if ( $updated && isset( $paymentResp['trxID'] ) && ! empty( $paymentResp['trxID'] ) ) {
-								// Payment complete.
-								if ( $paymentResp['transactionStatus'] === 'Authorized' ) {
-									$order->update_status( 'on-hold' );
-								} elseif ( $paymentResp['transactionStatus'] === 'Completed' ) {
-									$order->payment_complete();
-								} else {
-									$order->update_status( 'pending' );
-								}
-
-								// Store the transaction ID for WC 2.2 or later.
-								add_post_meta( $order->get_id(), '_transaction_id', $paymentResp['trxID'], true );
-
-								// Add order note.
-								$order->add_order_note(
-									sprintf( 'bKash PGW payment approved (ID: %s)', $paymentResp['trxID'] )
-								);
-
-								if ( isset( $this->log ) && $this->log ) {
-									$this->log->add(
-										$this->id,
-										'bKash PGW payment approved (ID: ' . $response['trxID'] . ')'
-									);
-								}
-
-								// Reduce stock levels.
-								wc_reduce_stock_levels( $order_id );
-
-								if ( isset( $this->log ) && $this->log ) {
-									$this->log->add( $this->id, 'Stocked reduced.' );
-								}
-
-								// Return thank you page redirect.
-								if ( $this->integration_type === 'checkout' ) {
-									echo wp_json_encode(
-										array(
-											'result'   => 'success',
-											'redirect' => $orderPageURL,
-										)
-									);
-									die();
-								}
-								wp_safe_redirect( $orderPageURL );
-								die();
+							$fresh = ( new Transaction() )->getTransaction( $invoice_id );
+							if ( $fresh instanceof Transaction ) {
+								$transaction = $fresh;
 							}
 
-							if ( $updated && isset( $paymentResp['paymentID'] ) && ! empty( $paymentResp['paymentID'] ) ) {
-								$msg = 'Transaction was not successful, last transaction status: ' . $paymentResp['transactionStatus'] ?? 'NO_STATUS_EXECUTE';
-								if ( $this->integration_type === 'checkout' ) {
-									echo wp_json_encode(
-										array(
-											'result'  => 'failure',
-											'message' => $msg,
-										)
-									);
-									die();
-								}
-
-								wc_add_notice( $msg, 'error' );
-								wp_safe_redirect( wc_get_checkout_url() );
-								die();
+							if ( $this->isSuccessfulTransaction( $transaction ) ) {
+								delete_transient( $lock_key );
+								$this->finalizeSuccessfulOrder( $order, $transaction, $orderPageURL );
 							}
-							$message = 'Could not get transaction status';
+
+							$message = 'Transaction was not successful, last transaction status: ' . $bkash_status;
 						} else {
-							$message = is_string( $paymentResp ) ? $paymentResp : '';
+							$message = is_string( $paymentResp ) ? $paymentResp : 'Could not get transaction status';
+						}
+
+						$fresh = ( new Transaction() )->getTransaction( $invoice_id );
+						if ( $fresh instanceof Transaction ) {
+							$recovered = $this->recoverSuccessfulPayment( $fresh );
+							if ( $recovered instanceof Transaction ) {
+								delete_transient( $lock_key );
+								$this->finalizeSuccessfulOrder( $order, $recovered, $orderPageURL );
+							}
+
+							if ( ! empty( $fresh->getTrxID() ) ) {
+								delete_transient( $lock_key );
+								$order->add_order_note( 'bKash Payment: ' . $message );
+								$this->failAndExit( $this->processResponse( $message ), $orderPageURL, $order );
+							}
 						}
 
 						$transaction->update(
@@ -196,50 +184,191 @@ class ProcessPayments {
 							)
 						);
 						$order->add_order_note( 'bKash Payment: ' . $message );
-
 						$message = $this->processResponse( $message );
 					}
 				} else {
+					$fresh = ( new Transaction() )->getTransaction( $invoice_id );
+					if ( $fresh instanceof Transaction && $this->isSuccessfulTransaction( $fresh ) ) {
+						delete_transient( $lock_key );
+						$this->finalizeSuccessfulOrder( $order, $fresh, $orderPageURL );
+					}
+
 					$message = $this->processResponse( 'Communication issue with payment gateway' );
 				}
 
-				if ( $this->integration_type === 'checkout' ) {
-					echo wp_json_encode(
-						array(
-							'result'  => 'failure',
-							'message' => $message,
-						)
-					);
-				} else {
-					wc_add_notice( $message, 'error' );
-					wp_safe_redirect( wc_get_checkout_url() );
-				}
-
-				die();
+				delete_transient( $lock_key );
+				$this->failAndExit( $message, $orderPageURL, $order );
 			}
-			// payment ID not matching or transaction not found. or already processed
+
 			$message = $this->processResponse( 'Invalid payment ID or Invoice ID' );
 		} else {
-			// transaction failed/cancelled.
 			$status = str_replace( array( 'cancel', 'failure' ), array( 'Cancelled', 'Failed' ), $status );
-			if ( $transaction->getStatus() !== 'Completed' ) {
-				$transaction->update(
-					array(
-						'status' => esc_html( $status ),
-					)
-				);
-				$order->add_order_note( 'bKash Payment is not successful. Status => ' . esc_html( $status ) );
-			} else {
+			if ( $this->isSuccessfulTransaction( $transaction ) ) {
 				$order->add_order_note(
-					'bKash Payment is already in Completed state. Tried to change Status to => '
-					. esc_html( $status )
+					'bKash Payment is already in Completed state. Tried to change Status to => ' . esc_html( $status )
 				);
+				$this->finalizeSuccessfulOrder( $order, $transaction, $orderPageURL );
 			}
 
+			$transaction->update(
+				array(
+					'status' => esc_html( $status ),
+				)
+			);
+			$order->add_order_note( 'bKash Payment is not successful. Status => ' . esc_html( $status ) );
 			$message = $this->processResponse( 'Transaction is ' . $status );
 		}
 
-		$order->add_order_note( 'bKash PGW payment declined (' . $message . ')' );
+		$this->failAndExit( $message, $orderPageURL, $order );
+	}
+
+	/**
+	 * Whether the stored bKash transaction already captured or authorized funds.
+	 */
+	private function isSuccessfulTransaction( $transaction ): bool {
+		if ( ! $transaction instanceof Transaction ) {
+			return false;
+		}
+
+		$status = (string) $transaction->getStatus();
+		$trx_id = (string) $transaction->getTrxID();
+
+		return '' !== $trx_id && in_array( $status, array( 'Completed', 'Authorized' ), true );
+	}
+
+	/**
+	 * Complete the WooCommerce order for a payment that already succeeded at bKash.
+	 */
+	private function finalizeSuccessfulOrder( $order, Transaction $transaction, string $orderPageURL ) {
+		if ( $order instanceof \WC_Order && $order->needs_payment() ) {
+			$trx_id = (string) $transaction->getTrxID();
+
+			if ( 'Authorized' === $transaction->getStatus() ) {
+				$order->update_status( 'on-hold' );
+			} else {
+				$order->payment_complete( $trx_id );
+			}
+
+			if ( '' !== $trx_id ) {
+				$order->set_transaction_id( $trx_id );
+				$order->save();
+				$order->add_order_note( sprintf( 'bKash PGW payment approved (ID: %s)', $trx_id ) );
+			}
+		}
+
+		if ( $this->integration_type === 'checkout' ) {
+			echo wp_json_encode(
+				array(
+					'result'   => 'success',
+					'redirect' => $orderPageURL,
+				)
+			);
+			die();
+		}
+
+		wp_safe_redirect( $orderPageURL );
+		die();
+	}
+
+	private function executeLockKey( string $payment_id ): string {
+		return 'bkash_pgw_execute_' . md5( $payment_id );
+	}
+
+	/**
+	 * If another request is already executing this payment, wait for it to finish.
+	 */
+	private function waitForInFlightExecute( string $invoice_id, string $payment_id, Transaction $transaction ): Transaction {
+		$lock_key = $this->executeLockKey( $payment_id );
+		if ( ! get_transient( $lock_key ) ) {
+			return $transaction;
+		}
+
+		for ( $i = 0; $i < 5; $i++ ) {
+			sleep( 1 );
+			$fresh = ( new Transaction() )->getTransaction( $invoice_id );
+			if ( $fresh instanceof Transaction ) {
+				$transaction = $fresh;
+				if ( $this->isSuccessfulTransaction( $transaction ) || ! get_transient( $lock_key ) ) {
+					break;
+				}
+			}
+		}
+
+		return $transaction;
+	}
+
+	/**
+	 * Parse execute response, and query bKash if execute did not return a trxID.
+	 *
+	 * @param array       $response    Execute API envelope.
+	 * @param Transaction $transaction Stored transaction.
+	 *
+	 * @return array|string
+	 */
+	private function resolveExecutedPayment( array $response, Transaction $transaction ) {
+		$paymentResp = Operations::processResponse( $response, 'trxID' );
+
+		if ( is_array( $paymentResp ) && ! empty( $paymentResp['trxID'] ) ) {
+			return $paymentResp;
+		}
+
+		$query = $this->bKashObj->queryPayment( (string) $transaction->getPaymentID() );
+
+		return Operations::processResponse( $query, 'trxID' );
+	}
+
+	/**
+	 * Ask bKash for the real payment status when the local row looks inconsistent.
+	 *
+	 * @param Transaction $transaction Stored transaction.
+	 *
+	 * @return Transaction|null
+	 */
+	private function recoverSuccessfulPayment( Transaction $transaction ) {
+		if ( $this->isSuccessfulTransaction( $transaction ) ) {
+			return $transaction;
+		}
+
+		$payment_id = (string) $transaction->getPaymentID();
+		if ( '' === $payment_id ) {
+			return null;
+		}
+
+		$query = $this->bKashObj->queryPayment( $payment_id );
+		$resp  = Operations::processResponse( $query, 'trxID' );
+		if ( ! is_array( $resp ) || empty( $resp['trxID'] ) ) {
+			return null;
+		}
+
+		$bkash_status = $resp['transactionStatus'] ?? '';
+		if ( ! in_array( $bkash_status, array( 'Completed', 'Authorized' ), true ) ) {
+			return null;
+		}
+
+		$transaction->update(
+			array(
+				'status' => $bkash_status,
+				'trx_id' => $resp['trxID'],
+			)
+		);
+
+		$invoice_id = (string) $transaction->getInvoiceID();
+		$fresh      = $invoice_id ? ( new Transaction() )->getTransaction( $invoice_id ) : null;
+
+		return $fresh instanceof Transaction ? $fresh : $transaction;
+	}
+
+	/**
+	 * @param string               $message
+	 * @param string               $orderPageURL
+	 * @param \WC_Order|false|null $order
+	 *
+	 * @return void
+	 */
+	private function failAndExit( string $message, string $orderPageURL, $order = null ) {
+		if ( $order instanceof \WC_Order ) {
+			$order->add_order_note( 'bKash PGW payment declined (' . $message . ')' );
+		}
 
 		if ( $this->integration_type === 'checkout' ) {
 			echo wp_json_encode(
@@ -248,12 +377,11 @@ class ProcessPayments {
 					'message' => $message,
 				)
 			);
-		} else {
-			wc_add_notice( $message, 'error' );
-			wp_safe_redirect( wc_get_cart_url() );
+			die();
 		}
 
-		// Return message to customer.
+		wc_add_notice( $message, 'error' );
+		wp_safe_redirect( wc_get_checkout_url() ? wc_get_checkout_url() : $orderPageURL );
 		die();
 	}
 
@@ -460,6 +588,13 @@ class ProcessPayments {
 				$trx         = new Transaction();
 				$transaction = $trx->getTransactionByOrderId( $order_id );
 				if ( $transaction ) {
+					if ( in_array( (string) $transaction->getStatus(), array( 'Completed', 'Authorized' ), true )
+						&& ! empty( $transaction->getTrxID() ) ) {
+						return array(
+							'result'  => 'failure',
+							'message' => 'Payment already completed and cannot be cancelled from checkout',
+						);
+					}
 					$transaction->update(
 						array(
 							'status' => 'Cancelled',

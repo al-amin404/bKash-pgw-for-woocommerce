@@ -383,11 +383,17 @@ class ApiComm {
 			$header
 		);
 
-		// QUERY PAYMENT IN CASE OF ANY NETWORK OR NO RESPONSE OR TIMED OUT ISSUE
-		$decoded_response = isset( $response['response'] ) && is_string( $response['response'] ) ?
-			json_decode( $response['response'], true ) : array();
+		$decoded_response = is_string( $response ) ? json_decode( $response, true ) : array();
+		if ( ! is_array( $decoded_response ) ) {
+			$decoded_response = array();
+		}
 
-		if ( $http_status !== 200 || isset( $decoded_response['message'] ) ) {
+		$execute_failed = $http_status !== 200
+			|| isset( $decoded_response['errorCode'] )
+			|| ( isset( $decoded_response['statusMessage'] ) && $decoded_response['statusMessage'] !== 'Successful' )
+			|| ( empty( $decoded_response['trxID'] ) && empty( $decoded_response['agreementID'] ) );
+
+		if ( $execute_failed ) {
 			return $this->queryPayment( $payment_id );
 		}
 
