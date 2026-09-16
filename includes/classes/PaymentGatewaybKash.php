@@ -601,6 +601,11 @@ class PaymentGatewaybKash extends WC_Payment_Gateway {
 			return;
 		}
 
+		// Block checkout loads its own payment method script; skip the shortcode checkout JS there.
+		if ( ! is_checkout_pay_page() && $this->is_using_checkout_block() ) {
+			return;
+		}
+
 		if ( $this->integration_type === 'checkout' ) {
 			$bk_script_url = Operations::CheckoutScriptURL( $this->sandbox === 'yes', $this->api_version );
 
@@ -654,6 +659,21 @@ class PaymentGatewaybKash extends WC_Payment_Gateway {
 		}
 
 		return true;
+	}
+
+	/**
+	 * Whether the store checkout page uses the Checkout block.
+	 *
+	 * @return bool
+	 */
+	protected function is_using_checkout_block() {
+		if ( class_exists( '\Automattic\WooCommerce\Blocks\Utils\CartCheckoutUtils' ) ) {
+			return \Automattic\WooCommerce\Blocks\Utils\CartCheckoutUtils::is_checkout_block_default();
+		}
+
+		$checkout_page_id = function_exists( 'wc_get_page_id' ) ? wc_get_page_id( 'checkout' ) : 0;
+
+		return $checkout_page_id && has_block( 'woocommerce/checkout', $checkout_page_id );
 	}
 
 	public function process_review_order_payment() {
@@ -711,7 +731,16 @@ class PaymentGatewaybKash extends WC_Payment_Gateway {
 
 	public function cancel_agreement_api() {
 		$message      = "";
-		$agreement_id = sanitize_text_field( $_REQUEST['id'] );
+		$nonce        = isset( $_REQUEST['security'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['security'] ) ) : '';
+		if ( $nonce && ! wp_verify_nonce( $nonce, 'bkash-ajax-nonce' ) ) {
+			echo wp_json_encode( array(
+				'result'  => 'failure',
+				'message' => 'Invalid request',
+			) );
+			die();
+		}
+
+		$agreement_id = isset( $_REQUEST['id'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['id'] ) ) : '';
 
 		$agreementModel = new Agreement();
 		$agreement      = $agreementModel->getAgreement( $agreement_id );
