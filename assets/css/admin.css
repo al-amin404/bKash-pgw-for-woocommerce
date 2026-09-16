@@ -29,6 +29,16 @@ div.bKash-warning {
     border-left-color: #ffb900;
 }
 
+.bkash-fw-filters input[type="search"],
+.bkash-fw-filters select {
+    min-width: 180px;
+    margin: 0 6px 6px 0;
+    padding: 3px 8px;
+    line-height: 2;
+    vertical-align: middle;
+    max-width: 100%;
+}
+
 .bKash-chip {
     display: inline;
     padding: 5px 12px;

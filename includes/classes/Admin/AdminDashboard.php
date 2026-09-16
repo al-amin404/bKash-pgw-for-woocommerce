@@ -31,7 +31,7 @@ class AdminDashboard {
 	 * Add menu for bKash PGW in WP Admin
 	 */
 	protected function AddMainMenu() {
-		add_menu_page(
+		$hook = add_menu_page(
 			'Woocommerce Payment Gateway - bKash',
 			'bKash',
 			'manage_options',
@@ -40,6 +40,7 @@ class AdminDashboard {
 			plugins_url( '../../assets/images/bkash_favicon_0.ico', __DIR__ )
 		);
 
+		add_action( 'admin_print_styles-' . $hook, array( $this, "admin_styles" ) );
 	}
 
 	/**

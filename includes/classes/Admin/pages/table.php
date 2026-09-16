@@ -35,30 +35,45 @@ function setStatusColor( $status ) {
         <!-- Search Form -->
         <div class="tablenav top">
             <div class="alignleft actions">
-
-                <form action="#" method="GET">
+				<?php
+				$page_name = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+				if ( $page_name === '' ) {
+					$page_name = BKASH_FW_ADMIN_PAGE_SLUG;
+				}
+				?>
+                <form class="bkash-fw-filters" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" method="get">
+                    <input type="hidden" name="page" value="<?php echo esc_attr( $page_name ); ?>"/>
 					<?php
 					if ( isset( $filters ) && count( $filters ) > 0 ) {
 						foreach ( $filters as $key => $filter ) {
-							$old_input = isset( $_GET[ $key ] ) ? sanitize_text_field( $_GET[ $key ] ) : "";
+							$normalized = \bKash\PGW\Admin\AdminUtility::normalizeFilter( $key, $filter );
+							$old_input  = isset( $_GET[ $normalized['key'] ] ) ? sanitize_text_field( wp_unslash( $_GET[ $normalized['key'] ] ) ) : '';
 							?>
-                            <input
-                                    type='text'
-                                    name='<?php esc_attr_e( $key, "bkash-for-woocommerce" ); ?>'
-                                    value='<?php esc_attr_e( $old_input, "bkash-for-woocommerce" ); ?>'
-                                    placeholder='<?php esc_attr_e( $filter, "bkash-for-woocommerce" ); ?>'/>
+                            <label>
+                                <span class="screen-reader-text"><?php echo esc_html( $normalized['label'] ); ?></span>
+								<?php if ( $normalized['type'] === 'select' ) { ?>
+                                    <select name="<?php echo esc_attr( $normalized['key'] ); ?>">
+                                        <option value=""><?php echo esc_html( $normalized['empty_label'] ); ?></option>
+										<?php foreach ( $normalized['options'] as $option_value => $option_label ) { ?>
+                                            <option value="<?php echo esc_attr( (string) $option_value ); ?>" <?php selected( $old_input, (string) $option_value ); ?>>
+												<?php echo esc_html( (string) $option_label ); ?>
+                                            </option>
+										<?php } ?>
+                                    </select>
+								<?php } else { ?>
+                                    <input
+                                            type="search"
+                                            name="<?php echo esc_attr( $normalized['key'] ); ?>"
+                                            value="<?php echo esc_attr( $old_input ); ?>"
+                                            placeholder="<?php echo esc_attr( $normalized['label'] ); ?>"/>
+								<?php } ?>
+                            </label>
 							<?php
 						}
 					}
-
-					$page_name = isset( $_GET['page'] ) ? sanitize_text_field( $_GET['page'] ) : '';
 					?>
-                    <input type='hidden' name='page'
-                           value='<?php esc_attr_e( $page_name, "bkash-for-woocommerce" ); ?>'/>
-                    <button type="submit">Search</button>
+                    <button type="submit" class="button"><?php esc_html_e( 'Search', 'bkash-for-woocommerce' ); ?></button>
                 </form>
-
-
             </div>
             <br class="clear">
         </div>

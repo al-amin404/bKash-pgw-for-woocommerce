@@ -24,11 +24,44 @@ class TransactionModule {
 				"DATETIME"         => "datetime",
 			),
 			array(
+				"order_id"   => "Order ID",
 				"trx_id"     => "Transaction ID",
 				"invoice_id" => "Invoice ID",
-				"status"     => "Status"
+				"status"     => array(
+					"label"       => "Status",
+					"type"        => "select",
+					"empty_label" => "All Statuses",
+					"options"     => self::getTransactionStatusOptions(),
+				)
 			)
 		);
+	}
+
+	private static function getTransactionStatusOptions() {
+		global $wpdb;
+
+		$options = array(
+			'Created'          => 'Created',
+			'CALLBACK_REACHED' => 'Callback Reached',
+			'Authorized'       => 'Authorized',
+			'Completed'        => 'Completed',
+			'Cancelled'        => 'Cancelled',
+			'Failed'           => 'Failed',
+			'Expired'          => 'Expired',
+		);
+
+		$table_name = $wpdb->prefix . 'bkash_transactions';
+		$statuses   = $wpdb->get_col( "SELECT DISTINCT `status` FROM `{$table_name}` WHERE `status` IS NOT NULL AND `status` <> '' ORDER BY `status` ASC" );
+
+		if ( is_array( $statuses ) ) {
+			foreach ( $statuses as $status ) {
+				if ( ! isset( $options[ $status ] ) ) {
+					$options[ $status ] = $status;
+				}
+			}
+		}
+
+		return $options;
 	}
 
 	public static function transaction_search() {

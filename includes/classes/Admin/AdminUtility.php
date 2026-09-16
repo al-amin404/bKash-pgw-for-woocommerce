@@ -22,10 +22,25 @@ class AdminUtility {
 		$searchFilters = [];
 		if ( count( $filters ) > 0 ) {
 			foreach ( $filters as $key => $filter ) {
-				$input = isset( $_GET[ $key ] ) ? sanitize_text_field( $_GET[ $key ] ) : null;
-				if ( $input ) {
-					$partialQuery    = $wpdb->prepare( 'AND ' . $key . ' LIKE %s', esc_sql( $input ) );
-					$searchFilters[] = $partialQuery;
+				$normalized = self::normalizeFilter( $key, $filter );
+				$input      = isset( $_GET[ $normalized['key'] ] ) ? sanitize_text_field( wp_unslash( $_GET[ $normalized['key'] ] ) ) : '';
+				if ( $input === '' ) {
+					continue;
+				}
+
+				$column = str_replace( '`', '', sanitize_key( $normalized['key'] ) );
+				if ( $column === '' ) {
+					continue;
+				}
+
+				if ( $normalized['type'] === 'select' ) {
+					$allowed = array_map( 'strval', array_keys( $normalized['options'] ) );
+					if ( ! in_array( $input, $allowed, true ) ) {
+						continue;
+					}
+					$searchFilters[] = $wpdb->prepare( 'AND `' . $column . '` = %s', $input );
+				} else {
+					$searchFilters[] = $wpdb->prepare( 'AND `' . $column . '` LIKE %s', '%' . $wpdb->esc_like( $input ) . '%' );
 				}
 			}
 		}
@@ -34,28 +49,51 @@ class AdminUtility {
 		$offset          = ( $pagenum - 1 ) * $limit;
 		$selectFrom      = "SELECT * from $table_name where ID > %d ";
 		$selectCountFrom = "SELECT count(*) as total from $table_name where ID > %d ";
+		$filterSql       = implode( "", $searchFilters );
 
-		$prepareQuery = $wpdb->prepare(
-			$selectFrom . implode( "", $searchFilters ), 0
-		);
-		$rows         = $wpdb->get_results( $prepareQuery . " ORDER BY id DESC limit  $offset, $limit" );
+		$prepareQuery = $wpdb->prepare( $selectFrom, 0 ) . $filterSql;
+		$rows         = $wpdb->get_results( $prepareQuery . $wpdb->prepare( " ORDER BY id DESC limit %d, %d", $offset, $limit ) );
 		$rowcount     = $wpdb->num_rows ?? 0;
 
 		$total        = $wpdb->get_var(
-			$wpdb->prepare( $selectCountFrom . implode( "", $searchFilters ), 0 )
+			$wpdb->prepare( $selectCountFrom, 0 ) . $filterSql
 		);
 		$num_of_pages = ceil( $total / $limit );
 
 		$page_links = paginate_links( array(
 			'base'      => add_query_arg( 'pagenum', '%#%' ),
 			'format'    => '',
-			'prev_text' => __( '&laquo;', 'text-domain' ),
-			'next_text' => __( '&raquo;', 'text-domain' ),
+			'prev_text' => __( '&laquo;', 'bkash-for-woocommerce' ),
+			'next_text' => __( '&raquo;', 'bkash-for-woocommerce' ),
 			'total'     => $num_of_pages,
 			'current'   => $pagenum
 		) );
 
 		include_once "pages/table.php";
+	}
+
+	public static function normalizeFilter( $key, $filter ) {
+		if ( is_array( $filter ) ) {
+			$label       = isset( $filter['label'] ) ? (string) $filter['label'] : $key;
+			$empty_label = isset( $filter['empty_label'] ) ? (string) $filter['empty_label'] : ( 'All ' . $label );
+			$options     = ( isset( $filter['options'] ) && is_array( $filter['options'] ) ) ? $filter['options'] : array();
+
+			return array(
+				'key'         => $key,
+				'label'       => $label,
+				'type'        => isset( $filter['type'] ) ? (string) $filter['type'] : 'search',
+				'empty_label' => $empty_label,
+				'options'     => $options,
+			);
+		}
+
+		return array(
+			'key'         => $key,
+			'label'       => (string) $filter,
+			'type'        => 'search',
+			'empty_label' => '',
+			'options'     => array(),
+		);
 	}
 
 	public static function get_bKash_options( $plugin_id, $key ) {
